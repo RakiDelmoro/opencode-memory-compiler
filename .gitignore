@@ -1,0 +1,15 @@
+# Runtime state
+state.json
+last-flush.json
+flush.log
+compile.log
+
+# Reports
+reports/
+
+# Transcripts (optional: keep if you want raw data)
+# raw/transcripts/
+
+# OS
+.DS_Store
+Thumbs.db
