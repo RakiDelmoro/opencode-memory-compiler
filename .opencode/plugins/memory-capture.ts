@@ -18,8 +18,14 @@ import { spawn } from 'child_process'
 import * as path from 'path'
 
 // Configuration - adjust these paths for your setup
+// Default to relative path from current working directory
+// Can be overridden with MEMORY_ROOT environment variable
 const MEMORY_ROOT = process.env.MEMORY_ROOT || './opencode-memory-compiler'
-const MEMORY_SAVE_SCRIPT = path.join(MEMORY_ROOT, 'scripts', 'memory_save.py')
+const MEMORY_SAVE_SCRIPT = path.resolve(process.cwd(), MEMORY_ROOT, 'scripts', 'memory_save.py')
+
+// Debug: log the resolved path
+console.log('[memory-capture] MEMORY_ROOT:', MEMORY_ROOT)
+console.log('[memory-capture] Script path:', MEMORY_SAVE_SCRIPT)
 
 // Track last session captured to avoid duplicates
 let lastCapturedSessionId: string | null = null
@@ -119,8 +125,8 @@ export const MemoryCapturePlugin: Plugin = async (ctx) => {
 
 function execMemorySave(sessionData: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Try python3 first, then python
-    const pythonCmd = process.env.PYTHON_PATH || 'python3'
+    // Use python3 directly - it's in PATH and we verified it works
+    const pythonCmd = 'python3'
     
     const proc = spawn(pythonCmd, [MEMORY_SAVE_SCRIPT], {
       stdio: ['pipe', 'pipe', 'pipe']
