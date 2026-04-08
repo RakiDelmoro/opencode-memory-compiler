@@ -20,30 +20,41 @@ pip install "mcp[cli]" --break-system-packages
 # or: uv sync
 ```
 
-### 3. Connect to Opencode (Optional)
+### 3. Automatic Capture (Recommended)
 
-Add to your `.opencode.json` (project root or home directory):
+Enable automatic session capture with the Opencode plugin:
+
+```bash
+# Copy plugin to your project's .opencode/plugins/ directory
+cp -r .opencode/plugins /path/to/your-project/.opencode/
+
+# Register MCP for query tools
+cd /path/to/your-project
+opencode mcp add memory local /path/to/python scripts/mcp_server.py
+
+# Restart Opencode
+```
+
+Now sessions are automatically captured and saved to daily logs!
+
+### 4. Manual Query Tools (Optional)
+
+If you also want to query the knowledge base from within Opencode, configure MCP in your project:
 
 ```json
 {
-  "mcpServers": {
+  "mcp": {
     "memory": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["scripts/mcp_server.py"]
+      "type": "local",
+      "command": ["/path/to/python", "/path/to/project/opencode-memory-compiler/scripts/mcp_server.py"]
     }
   }
 }
 ```
 
-**Important:** Run Opencode from the memory system directory so the relative path works.
-
-Now memory tools are available in Opencode:
-- `memory_query "your question"` - Query the knowledge base
-- `memory_save_direct "content" "title"` - Save directly to daily log
-- `memory_compile` - Trigger compilation
-- `memory_status` - Show statistics
-- `memory_lint` - Run health checks
+Then in Opencode use:
+- `use memory_memory_query "your question"` - Query knowledge base
+- `use memory_memory_status` - Show system stats
 
 ### 4. Use Without MCP
 
