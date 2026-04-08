@@ -14,13 +14,15 @@ cd opencode-memory-compiler
 ### 2. Install Dependencies
 
 ```bash
+# Requires Python 3.12+
 pip install -e .
+pip install "mcp[cli]" --break-system-packages
 # or: uv sync
 ```
 
 ### 3. Connect to Opencode (Optional)
 
-Add to your **project-level** `.opencode.json` or **global** `~/.opencode.json`:
+Add to your `.opencode.json` (project root or home directory):
 
 ```json
 {
@@ -33,6 +35,8 @@ Add to your **project-level** `.opencode.json` or **global** `~/.opencode.json`:
   }
 }
 ```
+
+**Important:** Run Opencode from the memory system directory so the relative path works.
 
 Now memory tools are available in Opencode:
 - `memory_query "your question"` - Query the knowledge base
