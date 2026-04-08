@@ -1,29 +1,136 @@
-# OpenCode Memory Compiler
+# LLM Memory System for Opencode
 
-Your OpenCode conversations compile themselves into a searchable knowledge base.
+Transform your Opencode conversations into a persistent, queryable knowledge base.
 
-Adapted from [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture, but instead of clipping web articles, the raw data is your own conversations with OpenCode. When a session ends (or auto-compacts mid-session), a TypeScript plugin captures the conversation transcript and spawns an extraction agent that extracts the important stuff — decisions, lessons learned, patterns, gotchas — and appends it to a daily log. You then compile those daily logs into structured, cross-referenced knowledge articles organized by concept. Retrieval uses a simple index file instead of RAG — no vector database, no embeddings, just markdown.
+## For Users: Quick Setup
 
-## Quick Start
+### 1. Clone the Repository
 
-Tell your AI coding agent:
+```bash
+git clone https://github.com/your-repo/opencode-memory-compiler.git
+cd opencode-memory-compiler
+```
 
-> "Clone https://github.com/RakiDelmoro/opencode-memory-compiler into this project.
-> Set up the OpenCode hooks so my conversations automatically get captured into
-> daily logs, compiled into a knowledge base, and retrieved in future sessions.
-> Read OPENCODE.md for the full technical reference on how everything works."
+### 2. Install Dependencies
 
-The agent will:
+```bash
+pip install -e .
+# or: uv sync
+```
 
-1. Clone the repo and run `uv sync` to install dependencies
-2. Register `extraction-plugin.ts` in your `opencode.json` config
-3. The hooks activate automatically next time you open OpenCode
+### 3. Connect to Opencode (Optional)
 
-From there, your conversations start accumulating. After 6 PM local time,
-the next session triggers automatic compilation of that day's logs into
-knowledge articles. You can also run `uv run python scripts/compile.py`
-manually at any time.
+Add to your **project-level** `.opencode.json` or **global** `~/.opencode.json`:
 
-## Technical Reference
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["scripts/mcp_server.py"]
+    }
+  }
+}
+```
 
-See **[OPENCODE.md](OPENCODE.md)** for the full technical reference: article formats, hook architecture, script internals, costs, and customization options.
+Now memory tools are available in Opencode:
+- `memory_query "your question"` - Query the knowledge base
+- `memory_save_direct "content" "title"` - Save directly to daily log
+- `memory_compile` - Trigger compilation
+- `memory_status` - Show statistics
+- `memory_lint` - Run health checks
+
+### 4. Use Without MCP
+
+Just run scripts directly from terminal:
+
+```bash
+# Compile daily logs into knowledge articles
+python scripts/compile.py
+
+# Ask questions about your knowledge
+python scripts/query.py "How do I handle authentication?"
+
+# Save important answers back to wiki
+python scripts/query.py "What is Supabase?" --file-back
+
+# Check wiki health
+python scripts/lint.py
+
+# Manually add content to daily log
+python scripts/flush.py --content "Today I learned about..."
+```
+
+## Switching to Real LLM
+
+The mock backend is free and works out of the box. For real AI:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+python scripts/compile.py --backend openai
+
+# Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+python scripts/compile.py --backend anthropic
+```
+
+Or set `LLM_BACKEND=openai` in `scripts/config.py`.
+
+## How It Works
+
+```
+daily/          = Your conversations (raw)
+knowledge/      = Compiled wiki (searchable)
+       ┌──────► compile.py
+       │              │
+       │         (LLM extracts)
+       │              ▼
+       │       knowledge/
+       │       ├── concepts/  (articles)
+       │       ├── qa/        (saved answers)
+       │       └── index.md   (catalog)
+       │
+       └──────► query.py
+                   │
+              (search wiki)
+                   ▼
+              Answer + citations
+```
+
+## Project Structure
+
+```
+.
+├── scripts/           # Core system
+│   ├── mcp_server.py  # Opencode integration
+│   ├── compile.py     # Log → articles
+│   ├── query.py       # Search wiki
+│   ├── lint.py        # Health checks
+│   ├── flush.py       # Add content
+│   ├── llm_backend.py # LLM adapters
+│   └── config.py      # Settings
+├── daily/             # Your conversations
+├── knowledge/         # Compiled wiki
+├── AGENTS.md          # Article schema
+└── pyproject.toml
+```
+
+## Testing
+
+```bash
+# Run all tests
+python scripts/compile.py
+python scripts/query.py "test"
+python scripts/lint.py
+```
+
+## Documentation
+
+- `AGENTS.md` - Article formats and conventions
+- `INTEGRATION.md` - Detailed setup guide
+
+## License
+
+MIT

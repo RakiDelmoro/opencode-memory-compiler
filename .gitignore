@@ -1,15 +1,42 @@
-# Runtime state
+# Opencode Memory System - Git Ignore
+
+# State tracking (runtime data)
+state/
 state.json
 last-flush.json
-flush.log
-compile.log
 
 # Reports
 reports/
+lint-*.md
 
-# Transcripts (optional: keep if you want raw data)
-# raw/transcripts/
+# Daily logs - these are source material but may contain sensitive info
+# Uncomment if you want to keep them out of git
+# daily/*.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# uv
+.uv/
+uv.lock
+
+# Temporary files
+*.tmp
+*.temp__pycache__/

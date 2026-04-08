@@ -1,9 +1,32 @@
 [project]
 name = "opencode-memory-compiler"
-version = "0.1.0"
-description = "Extract knowledge from OpenCode conversations into a structured wiki"
-requires-python = ">=3.12"
+version = "1.0.0"
+description = "A persistent knowledge base system for Opencode conversations"
+authors = [{name = "OpenMemory Contributor"}]
 dependencies = [
-    "requests>=2.31.0",
     "python-dotenv>=1.0.0",
+    "tzdata>=2024.1",
+    "mcp[cli]>=1.0.0",
 ]
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+sources = []
+
+[project.scripts]
+# Optional: expose commands directly
+opencode-compile = "scripts.compile:main"
+opencode-query = "scripts.query:main"
+opencode-lint = "scripts.lint:main"
+opencode-flush = "scripts.flush:main"

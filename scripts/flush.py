@@ -1,269 +1,275 @@
+#!/usr/bin/env python3
 """
-Memory flush — extracts important knowledge from a conversation transcript.
-
-Can be called standalone or by the extraction plugin. Uses the OpenCode REST
-API to run an extraction agent session that reads the transcript and writes
-knowledge articles.
-
-Usage:
-    uv run python flush.py <session_id>
-    uv run python flush.py --file <transcript.json>
-    uv run python flush.py --text "conversation text here"
+Background process: Extract knowledge from an Opencode session and append to daily log.
+Spawned by hooks as a fully detached background process.
 """
-
-from __future__ import annotations
 
 import argparse
-import json
-import logging
-import subprocess
+import asyncio
+import os
 import sys
 import time
-from datetime import datetime, timezone
+import subprocess
+from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple
 
-from config import (
-    DAILY_SUMMARY_DIR,
-    KNOWLEDGE_DIR,
-    LOGS_DIR,
-    OPENCODE_API_BASE,
-    ROOT_DIR,
-    SCRIPTS_DIR,
-    STATE_FILE,
-    TRANSCRIPT_DIR,
-    now_iso,
-    today_iso,
-)
+# Add scripts directory to path to import sibling modules
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+PROJECT_ROOT = SCRIPTS_DIR.parent
+
+from config import DAILY_DIR, STATE_DIR, LAST_FLUSH_FILE, FLUSH_DEDUP_SECONDS, COMPILE_AFTER_HOUR
 from utils import (
-    append_to_master_log,
-    ensure_daily_log,
-    file_hash,
-    load_flush_state,
     load_state,
-    save_flush_state,
     save_state,
+    read_last_flush,
+    save_last_flush,
 )
-
-logging.basicConfig(
-    filename=str(SCRIPTS_DIR / "flush.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M",
-)
-
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
+from llm_backend import get_backend
 
 
-def extract_transcript_from_session(session_id: str) -> str:
-    """Export a session transcript via `opencode export`."""
+class FlushError(Exception):
+    """Base exception for flush operations"""
+    pass
+
+
+class SessionExtractionError(FlushError):
+    """Failed to extract session content"""
+    pass
+
+
+class KnowledgeExtractionError(FlushError):
+    """Failed to extract knowledge from session"""
+    pass
+
+
+def now_iso() -> str:
+    """Get current timestamp in ISO 8601 format"""
+    return datetime.now().isoformat()
+
+
+def should_skip_flush(session_id: str) -> tuple[bool, str]:
+    """
+    Check if this flush should be skipped due to deduplication.
+    Returns (skip, reason)
+    """
+    if not LAST_FLUSH_FILE.exists():
+        return False, "No previous flush record"
+    
+    last_flush = read_last_flush()
+    if last_flush.get("session_id") != session_id:
+        return False, "Different session"
+    
+    # Check time since last flush
+    last_time_str = last_flush.get("timestamp")
+    if last_time_str:
+        try:
+            last_time = datetime.fromisoformat(last_time_str)
+            elapsed = (datetime.now() - last_time).total_seconds()
+            if elapsed < FLUSH_DEDUP_SECONDS:
+                return True, f"Flushed {elapsed:.0f}s ago (dedup window: {FLUSH_DEDUP_SECONDS}s)"
+        except Exception:
+            pass  # If timestamp parse fails, allow flush
+    
+    return False, "OK to flush"
+
+
+async def extract_knowledge_with_agent(session_content: str) -> Tuple[str, float]:
+    """
+    Use LLM to extract key knowledge from session.
+    Returns (formatted knowledge bullets to append to daily log, cost).
+    """
+    from config import LLM_BACKEND
+    backend = get_backend(LLM_BACKEND)
+    
+    prompt = f"""Extract structured knowledge from this conversation.
+
+Conversation:
+{session_content}
+
+Extract and format as:
+
+## Knowledge Extraction (auto-generated)
+
+**Key Decisions:**
+- [List decisions made during this session]
+
+**Patterns Identified:**
+- [List coding patterns, approaches, or techniques]
+
+**Lessons Learned:**
+- [List important lessons, gotchas, or insights]
+
+**Action Items:**
+- [ ] [List follow-up tasks or todos]
+
+Be concise. If nothing significant was decided or learned, write "No significant knowledge extracted."
+""".strip()
+    
     try:
-        result = subprocess.run(
-            ["opencode", "export", session_id],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        extracted_text, cost = await backend.query_with_cost(
+            prompt=prompt,
+            system_prompt="You are a knowledge extraction assistant that identifies decisions, patterns, lessons, and action items from conversations.",
+            max_turns=2
         )
-        if result.returncode == 0:
-            return result.stdout
+        return extracted_text, cost
     except Exception as e:
-        logging.error("Failed to export session %s: %s", session_id, e)
-    return ""
+        print(f"Warning: Knowledge extraction failed: {e}")
+        return "No significant knowledge extracted.", 0.0
 
 
-def extract_transcript_from_file(file_path: Path) -> str:
-    """Read a transcript file (JSON or JSONL)."""
-    if not file_path.exists():
-        logging.error("Transcript file not found: %s", file_path)
-        return ""
-
-    content = file_path.read_text(encoding="utf-8")
-
-    # Try JSONL format
-    if file_path.suffix == ".jsonl":
-        turns = []
-        for line in content.strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-                msg = entry.get("message", entry)
-                role = msg.get("role", "")
-                if role in ("user", "assistant"):
-                    parts_data = msg.get("parts", [])
-                    text_parts = []
-                    if isinstance(parts_data, list):
-                        for p in parts_data:
-                            if isinstance(p, dict) and p.get("type") == "text":
-                                text_parts.append(p.get("text", ""))
-                            elif isinstance(p, str):
-                                text_parts.append(p)
-                    elif isinstance(parts_data, str):
-                        text_parts.append(parts_data)
-
-                    content_text = "\n".join(text_parts).strip()
-                    if content_text:
-                        label = "User" if role == "user" else "Assistant"
-                        turns.append(f"**{label}:** {content_text}")
-                elif isinstance(msg.get("content"), str) and role in ("user", "assistant"):
-                    label = "User" if role == "user" else "Assistant"
-                    turns.append(f"**{label}:** {msg['content'].strip()}")
-            except json.JSONDecodeError:
-                continue
-        return "\n\n".join(turns)
-
-    # Plain JSON or markdown — return as-is
-    return content
+def append_to_daily_log(log_path: Path, session_content: str, knowledge_bullets: str) -> None:
+    """Append session and extracted knowledge to the daily log"""
+    with open(log_path, 'a', encoding='utf-8') as f:
+        f.write(f"\n\n## Session {datetime.now().strftime('%H:%M')}\n\n")
+        f.write(session_content)
+        if knowledge_bullets and knowledge_bullets.strip():
+            f.write("\n\n" + knowledge_bullets + "\n")
 
 
-def append_to_daily_log(content: str, session_id: str, source: str = "manual") -> None:
-    """Append extracted content to today's daily log."""
-    today = today_iso()
-    log_path = ensure_daily_log(today)
-    timestamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
-
-    entry = f"\n## [{timestamp}] extract | Session {session_id} ({source})\n\n{content}\n"
-
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(entry)
-
-    logging.info("Appended to daily log %s for session %s", today, session_id)
-
-
-def maybe_trigger_compilation() -> None:
-    """If past compile hour and today's log hasn't been compiled, trigger compile.py."""
-    now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
-        return
-
-    today_log = f"{today_iso()}.md"
-    state = load_state()
-    ingested = state.get("ingested", {})
-
-    if today_log in ingested:
-        log_path = LOGS_DIR / today_log
-        if log_path.exists():
-            current_hash = file_hash(log_path)
-            if ingested[today_log].get("hash") == current_hash:
+def maybe_trigger_auto_compile(log_path: Path) -> None:
+    """
+    Check if it's past 6 PM local time and trigger auto-compilation
+    if today's daily log has changed since last compilation.
+    """
+    from config import COMPILE_AFTER_HOUR, STATE_FILE
+    from utils import load_state, file_hash
+    
+    now = datetime.now()
+    if now.hour >= COMPILE_AFTER_HOUR:
+        # Check if this log has already been compiled today
+        state = load_state()
+        log_stat = log_path.stat()
+        log_mtime = log_stat.st_mtime
+        log_filename = str(log_path.relative_to(PROJECT_ROOT))
+        
+        if log_filename in state.get("ingested", {}):
+            last_compiled = state["ingested"][log_filename].get("compiled_at", 0)
+            if last_compiled and last_compiled >= log_mtime:
+                # Already compiled since last modification
                 return
+        
+        # Trigger compilation as background process
+        print(f"Auto-compilation triggered for {log_path.name}")
+        try:
+            # Use subprocess to run compile.py in background
+            subprocess.Popen(
+                [sys.executable, str(PROJECT_ROOT / "scripts" / "compile.py")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as e:
+            print(f"Warning: Could not spawn compile: {e}")
 
-    compile_script = SCRIPTS_DIR / "compile.py"
-    if not compile_script.exists():
-        return
 
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
-
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        import subprocess as _sp
-        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
-
+async def main_async(session_content: str, session_id: str = None, session_log_path: Path = None) -> int:
+    """
+    Main async logic for flushing a session.
+    
+    Args:
+        session_content: The conversation transcript as text
+        session_id: Unique identifier for deduplication
+        session_log_path: Path where session was/will be saved
+    """
     try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        cmd = ["uv", "run", "--directory", str(ROOT_DIR), "python", str(compile_script)]
-        subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, cwd=str(ROOT_DIR), **kwargs)
+        # Generate session ID if not provided
+        session_id = session_id or f"session-{int(time.time())}"
+        
+        # Deduplication check
+        skip, reason = should_skip_flush(session_id)
+        if skip:
+            print(f"Flush skipped: {reason}")
+            return 0
+        
+        # Ensure we have session content
+        if not session_content or not session_content.strip():
+            print("Session content empty or whitespace only")
+            return 0
+        
+        # Extract knowledge using agent
+        print("Extracting knowledge from session...")
+        knowledge_bullets, extract_cost = await extract_knowledge_with_agent(session_content)
+        print(f"  Extraction cost: ${extract_cost:.4f}")
+        
+        # Determine daily log path
+        if session_log_path is None:
+            daily_log_path = DAILY_DIR / datetime.now().strftime("%Y-%m-%d.md")
+        else:
+            daily_log_path = session_log_path
+        
+        # Append to daily log
+        append_to_daily_log(daily_log_path, session_content, knowledge_bullets)
+        print(f"Appended to daily log: {daily_log_path}")
+        
+        # Update flush tracking
+        flush_data = {
+            "session_id": session_id,
+            "timestamp": now_iso(),
+            "log_file": str(daily_log_path.relative_to(PROJECT_ROOT)),
+        }
+        save_last_flush(flush_data)
+        
+        # Maybe trigger auto-compile
+        maybe_trigger_auto_compile(daily_log_path)
+        
+        # Track total cost
+        state = load_state()
+        state["total_cost"] = state.get("total_cost", 0) + extract_cost
+        save_state(state)
+        
+        print("Flush completed successfully")
+        return 0
+        
     except Exception as e:
-        logging.error("Failed to spawn compile.py: %s", e)
+        print(f"Error during flush: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
-def run_extraction_via_cli(transcript_text: str, session_id: str) -> str:
-    """Use `opencode run` to extract knowledge from transcript text."""
-    prompt = f"""You are a knowledge extraction agent. Read the conversation below and extract key knowledge.
-
-Follow the schema in OPENCODE.md strictly. Create or update articles, append to the daily log, update the index.
-
-If nothing is worth saving, respond with exactly: FLUSH_OK
-
-## Conversation
-
-{transcript_text}"""
-
-    try:
-        result = subprocess.run(
-            [
-                "opencode", "run",
-                "--agent", "build",
-                "--dir", str(ROOT_DIR),
-                "--format", "json",
-                prompt,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        logging.error("Extraction timed out for session %s", session_id)
-        return "FLUSH_ERROR: timeout"
-    except Exception as e:
-        logging.error("Extraction failed for session %s: %s", session_id, e)
-        return f"FLUSH_ERROR: {e}"
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Extract knowledge from a conversation transcript")
-    parser.add_argument("session_id", nargs="?", help="Session ID to extract from")
-    parser.add_argument("--file", type=str, help="Path to transcript file")
-    parser.add_argument("--text", type=str, help="Inline conversation text")
-    parser.add_argument("--source", type=str, default="manual", help="Source label (session-end, pre-compact, manual)")
+def main() -> int:
+    """Entry point for flush.py"""
+    parser = argparse.ArgumentParser(description="Flush session memory to daily log")
+    parser.add_argument("session_log", type=Path, nargs="?", 
+                       help="Path to session log file (optional)")
+    parser.add_argument("--session-id", help="Unique session identifier for deduplication")
+    parser.add_argument("--content", help="Session content directly (instead of file)")
+    
     args = parser.parse_args()
-
-    session_id = args.session_id or "manual"
-    source = args.source
-
-    # Deduplication: skip if same session was flushed within 60 seconds
-    flush_state = load_flush_state()
-    if (
-        flush_state.get("session_id") == session_id
-        and time.time() - flush_state.get("timestamp", 0) < 60
-    ):
-        logging.info("Skipping duplicate flush for session %s", session_id)
-        print(f"Skipping duplicate flush for session {session_id}")
-        return
-
-    # Get transcript text
-    transcript_text = ""
-    if args.text:
-        transcript_text = args.text
-    elif args.file:
-        transcript_text = extract_transcript_from_file(Path(args.file))
-    elif args.session_id:
-        transcript_text = extract_transcript_from_session(args.session_id)
-
-    if not transcript_text.strip():
-        logging.warning("No transcript content for session %s", session_id)
-        print("No transcript content to extract from")
-        return
-
-    logging.info("Flushing session %s: %d chars", session_id, len(transcript_text))
-
-    # Run extraction
-    result = run_extraction_via_cli(transcript_text, session_id)
-
-    if "FLUSH_OK" in result:
-        logging.info("Result: FLUSH_OK for session %s", session_id)
-        append_to_daily_log("Nothing worth saving from this session.", session_id, source)
-    elif "FLUSH_ERROR" in result:
-        logging.error("Result: %s for session %s", result, session_id)
-        append_to_daily_log(f"Extraction error: {result}", session_id, source)
-    else:
-        logging.info("Extraction complete for session %s", session_id)
-        append_to_daily_log(f"Extraction completed. Result: {result[:500]}...", session_id, source)
-
-    # Update dedup state
-    save_flush_state({"session_id": session_id, "timestamp": time.time()})
-
-    # Update master log
-    timestamp = now_iso()
-    append_to_master_log(f"## [{timestamp}] extract | Session {session_id} — {source}")
-
-    # End-of-day auto-compilation
-    maybe_trigger_compilation()
-
-    logging.info("Flush complete for session %s", session_id)
-    print(f"Flush complete for session {session_id}")
+    
+    # Get session content
+    session_content = None
+    session_log_path = None
+    
+    if args.content:
+        session_content = args.content
+    elif args.session_log:
+        if args.session_log.exists():
+            session_content = args.session_log.read_text(encoding='utf-8')
+            session_log_path = args.session_log
+        else:
+            print(f"Error: Session log not found: {args.session_log}")
+            return 1
+    
+    # If no content provided, try to read from stdin (hook might pipe it)
+    if session_content is None:
+        try:
+            if not sys.stdin.isatty():
+                session_content = sys.stdin.read()
+        except Exception:
+            pass
+    
+    if not session_content or not session_content.strip():
+        print("No session content provided")
+        return 0  # Not an error - just nothing to do
+    
+    # Run async main
+    return asyncio.run(main_async(session_content, args.session_id, session_log_path))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
