@@ -1,150 +1,128 @@
-# LLM Memory System for Opencode
+# OpenCode Memory Compiler
 
-Transform your Opencode conversations into a persistent, queryable knowledge base.
+> Give OpenCode a persistent memory. It remembers every conversation, compiles knowledge into a structured wiki, and recalls it at session start.
 
-## For Users: Quick Setup
+**Inspired by:**
+- [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — the persistent, compounding knowledge base pattern
 
-### 1. Clone the Repository
+---
 
-```bash
-git clone https://github.com/your-repo/opencode-memory-compiler.git
-cd opencode-memory-compiler
-```
+## What It Does
 
-### 2. Install Dependencies
+| Feature | Description |
+|---------|-------------|
+| **Auto-capture** | Every session → daily log, automatically |
+| **LLM extraction** | Pulls decisions, patterns, lessons from transcripts |
+| **Wiki compilation** | Structured `knowledge/` articles, cross-linked, always current |
+| **Memory injection** | At each new session start → AI reads its knowledge base |
+| **Deep query** | `memory_query` → synthesized answer with citations |
+| **Health checks** | `memory_lint` → finds broken links, orphan pages |
 
-```bash
-# Requires Python 3.12+
-pip install -e .
-pip install "mcp[cli]" --break-system-packages
-# or: uv sync
-```
-
-### 3. Automatic Capture (Recommended)
-
-Enable automatic session capture with the Opencode plugin:
-
-```bash
-# Copy plugin to your project's .opencode/plugins/ directory
-cp -r .opencode/plugins /path/to/your-project/.opencode/
-
-# Register MCP for query tools
-cd /path/to/your-project
-opencode mcp add memory local /path/to/python scripts/mcp_server.py
-
-# Restart Opencode
-```
-
-Now sessions are automatically captured and saved to daily logs!
-
-### 4. Manual Query Tools (Optional)
-
-If you also want to query the knowledge base from within Opencode, configure MCP in your project:
-
-```json
-{
-  "mcp": {
-    "memory": {
-      "type": "local",
-      "command": ["/path/to/python", "/path/to/project/opencode-memory-compiler/scripts/mcp_server.py"]
-    }
-  }
-}
-```
-
-Then in Opencode use:
-- `use memory_memory_query "your question"` - Query knowledge base
-- `use memory_memory_status` - Show system stats
-
-### 4. Use Without MCP
-
-Just run scripts directly from terminal:
-
-```bash
-# Compile daily logs into knowledge articles
-python scripts/compile.py
-
-# Ask questions about your knowledge
-python scripts/query.py "How do I handle authentication?"
-
-# Save important answers back to wiki
-python scripts/query.py "What is Supabase?" --file-back
-
-# Check wiki health
-python scripts/lint.py
-
-# Manually add content to daily log
-python scripts/flush.py --content "Today I learned about..."
-```
-
-## Switching to Real LLM
-
-The mock backend is free and works out of the box. For real AI:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY="sk-..."
-python scripts/compile.py --backend openai
-
-# Anthropic
-export ANTHROPIC_API_KEY="sk-ant-..."
-python scripts/compile.py --backend anthropic
-```
-
-Or set `LLM_BACKEND=openai` in `scripts/config.py`.
+---
 
 ## How It Works
 
 ```
-daily/          = Your conversations (raw)
-knowledge/      = Compiled wiki (searchable)
-       ┌──────► compile.py
-       │              │
-       │         (LLM extracts)
-       │              ▼
-       │       knowledge/
-       │       ├── concepts/  (articles)
-       │       ├── qa/        (saved answers)
-       │       └── index.md   (catalog)
-       │
-       └──────► query.py
-                   │
-              (search wiki)
-                   ▼
-              Answer + citations
+Your conversation
+ (session.idle)
+       ↓
+  daily/YYYY-MM-DD.md          (raw, append-only)
+       ↓                        (compiled after 6 PM or via tool)
+       ↓
+  LLM compiles daily log
+       ↓
+  knowledge/concepts/*.md       (structured wiki articles)
+  knowledge/connections/*.md    (cross-cutting insights)
+  knowledge/qa/*.md             (saved Q&A)
+  knowledge/index.md            (master catalog)
+       ↑                        (injected at session.start)
+  memory injection
 ```
 
-## Project Structure
+The LLM writes and maintains the wiki. **You never edit it manually.** It compounds over time.
+
+---
+
+## Quick Start
+
+### 1. Copy the plugin
+
+```bash
+# Project-level (recommended)
+cp -r .opencode/plugins /your-project/.opencode/
+
+# Or global
+cp -r .opencode/plugins ~/.config/opencode/
+```
+
+### 2. That's it
+
+Next time you start OpenCode:
+- Sessions are **automatically captured** when they go idle
+- Knowledge is **injected** at the start of new sessions
+- Daily logs are **compiled** automatically after 6 PM
+
+Use tools from any session:
+- `memory_query "How did we handle auth?"` — Ask the wiki
+- `memory_compile` — Compile now (don't wait for 6 PM)
+- `memory_lint` — Health-check the knowledge base
+- `memory_status` — Show statistics
+
+---
+
+## Directory Structure
 
 ```
 .
-├── scripts/           # Core system
-│   ├── mcp_server.py  # Opencode integration
-│   ├── compile.py     # Log → articles
-│   ├── query.py       # Search wiki
-│   ├── lint.py        # Health checks
-│   ├── flush.py       # Add content
-│   ├── llm_backend.py # LLM adapters
-│   └── config.py      # Settings
-├── daily/             # Your conversations
-├── knowledge/         # Compiled wiki
-├── AGENTS.md          # Article schema
-└── pyproject.toml
+├── .opencode/
+│   └── plugins/
+│       └── memory.ts           # The entire system
+├── AGENTS.md                   # Schema — tells the LLM how to organize
+├── daily/                      # Raw conversation logs (gitignored)
+├── knowledge/
+│   ├── index.md               # Master catalog
+│   ├── log.md                 # Append-only build log
+│   ├── concepts/              # Compiled wiki articles
+│   ├── connections/           # Cross-cutting insights
+│   └── qa/                    # Saved Q&A articles
+└── state/                      # Compilation tracking (gitignored)
+    └── state.json
 ```
 
-## Testing
+---
 
-```bash
-# Run all tests
-python scripts/compile.py
-python scripts/query.py "test"
-python scripts/lint.py
-```
+## No External Dependencies
 
-## Documentation
+- **No Python** — everything is TypeScript/Bun
+- **No separate API keys** — uses OpenCode's configured model
+- **No MCP setup** — the plugin is self-contained
+- **No background processes** — runs within OpenCode's event loop
 
-- `AGENTS.md` - Article formats and conventions
-- `INTEGRATION.md` - Detailed setup guide
+---
+
+## How This Relates to Karpathy's LLM Wiki
+
+Karpathy's insight: **compilation over retrieval.** Instead of RAG re-discovering answers from scratch, the LLM incrementally builds a persistent wiki that compounds over time.
+
+| Karpathy's Layer | Our Implementation |
+|------------------|-------------------|
+| Raw sources (immutable) | Daily logs from `session.idle` |
+| Wiki (LLM-owned) | `knowledge/` articles, compiled by LLM |
+| Schema (AGENTS.md) | Tells the LLM how to organize |
+| Ingest (auto-capture) | Plugin event hooks, no manual work |
+| Query (ask the wiki) | `memory_query` tool |
+| Lint (health check) | `memory_lint` tool |
+
+---
+
+## Tips
+
+- Point **Obsidian** at `knowledge/` for graph view and backlinks
+- Commit `knowledge/` to git for version history
+- Run `memory_compile` manually for immediate results
+- The more you use it, the smarter it gets
+
+---
 
 ## License
 

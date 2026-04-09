@@ -1,19 +1,18 @@
-# Opencode Memory System - Git Ignore
+# OpenCode Memory System - Git Ignore
 
 # State tracking (runtime data)
 state/
 state.json
 last-flush.json
 
+# Daily logs - raw conversation transcripts, may contain sensitive info
+daily/*.md
+
 # Reports
 reports/
 lint-*.md
 
-# Daily logs - these are source material but may contain sensitive info
-# Uncomment if you want to keep them out of git
-# daily/*.md
-
-# Python cache
+# Python cache (legacy cleanup)
 __pycache__/
 *.py[cod]
 *$py.class
@@ -39,4 +38,4 @@ uv.lock
 
 # Temporary files
 *.tmp
-*.temp__pycache__/
+*.temp

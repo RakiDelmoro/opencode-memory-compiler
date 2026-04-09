@@ -1,300 +1,168 @@
 # Integration Guide: Making This System Operational
 
-This guide explains how to connect Opencode to the memory compiler system using MCP (Model Context Protocol).
+This guide explains how to install and use the OpenCode Memory Compiler plugin.
 
 ## Integration Overview
 
-Two integration points need to be connected:
+One integration point:
 
-1. **MCP Server**: The bridge that exposes memory tools to Opencode
-2. **Session Extraction**: Method to capture conversation transcripts
+1. **Plugin**: `.opencode/plugins/memory.ts` — self-contained TypeScript plugin that hooks into OpenCode events and provides tools via the SDK
 
-## Integration Approach: MCP Server
-
-Instead of hooks, we use MCP (Model Context Protocol) - the standard way to extend Opencode with external tools.
+No MCP server, no Python scripts, no shell scripts, no background processes.
 
 ### Architecture
 
 ```
-┌─────────────────┐    MCP Tool Call     ┌─────────────────────┐
-│   OpenCode TUI  │ ────────────────────> │   Memory MCP       │
-│   (Go process)  │   memory_save_session │   Server (Python)  │
-└─────────────────┘                      └─────────────────────┘
-                                                      │
-                                                      │ subprocess
-                                                      ▼
-                                            ┌─────────────────────┐
-                                            │  Python Scripts     │
-                                            │  (flush, compile,   │
-                                            │   query, lint)      │
-                                            └─────────────────────┘
-                                                      │
-                                                      ▼
-                                            ┌─────────────────────┐
-                                            │  knowledge/         │
-                                            │  daily/             │
-                                            └─────────────────────┘
+┌─────────────────────────────────────────┐
+│  OpenCode Plugin (memory.ts)            │
+│  ┌─────────────────────────────────┐    │
+│  │ Events:                         │    │
+│  │   session.idle     → capture    │    │
+│  │   session.created  → inject     │    │
+│  │                                 │    │
+│  │ Tools:                          │    │
+│  │   memory_query   → Q&A          │    │
+│  │   memory_compile → compile      │    │
+│  │   memory_lint    → health check │    │
+│  │   memory_status  → statistics   │    │
+│  └─────────────────────────────────┘    │
+│                                         │
+│  LLM calls via client.session.prompt()  │
+│  File I/O via Bun $ shell API           │
+│  No external API keys or Python needed  │
+└─────────────────────────────────────────┘
 ```
-
-### What the MCP Server Provides
-
-The `scripts/mcp_server.py` exposes these tools to Opencode:
-
-| Tool | Description |
-|------|-------------|
-| `memory_save` | Save session messages to daily log |
-| `memory_save_direct` | Directly save content to daily log |
-| `memory_query` | Query the knowledge base |
-| `memory_compile` | Trigger manual compilation |
-| `memory_lint` | Run health checks |
-| `memory_status` | Get system statistics |
-
-And these resources:
-
-| Resource | Description |
-|----------|-------------|
-| `memory://index` | Knowledge base index |
-| `memory://status` | System status |
 
 ## Setup Instructions
 
-### 1. Install MCP Dependency
+### 1. Copy the plugin
 
 ```bash
-pip install "mcp[cli]" --break-system-packages
+# For a specific project
+cp -r .opencode/plugins /your-project/.opencode/
+
+# Or globally
+cp -r .opencode/plugins ~/.config/opencode/
 ```
 
-Or if using uv:
+### 2. Restart OpenCode
 
-```bash
-uv add "mcp[cli]"
-```
+That's it. The plugin loads automatically on next start.
 
-### 2. Configure Opencode
+## How the Events Work
 
-Add the MCP server to your `.opencode.json`:
+| Event | Trigger | What happens |
+|-------|---------|-------------|
+| `session.idle` | Session ends | Fetches messages → formats transcript → extracts knowledge via LLM → appends to daily log |
+| `session.created` | New session starts | Reads `knowledge/index.md` → injects context into session (noReply: true) |
 
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["scripts/mcp_server.py"]
-    }
-  }
-}
-```
+The plugin also auto-compiles daily logs after 6 PM local time, or when manually triggered.
 
-The MCP server will be available in the current directory. For project-level config, add `.opencode.json` to your project root.
+## Usage
 
-### 3. Test the Connection
+Once the plugin is installed, these tools are available in any OpenCode session:
 
-Run the MCP server standalone to verify it works:
+### `memory_query`
 
-```bash
-python scripts/mcp_server.py
-```
-
-You should see it start up in stdio mode. Press `Ctrl+C` to stop.
-
-### 4. Use in Opencode
-
-Once configured, the memory tools are available. Use them in your conversations:
+Answer questions about your past decisions, patterns, and lessons.
 
 ```
-You: Save this session to memory
-→ OpenCode calls memory_save with session data
-
-You: Query my knowledge about auth
-→ OpenCode calls memory_query with the question
-
-You: What's the memory system status?
-→ OpenCode calls memory_status
+You: memory_query "How did we handle auth last time?"
 ```
 
-## Session Extraction
+### `memory_compile`
 
-### Option A: Pass Messages Directly
-
-When calling `memory_save`, pass the session messages as JSON:
-
-```python
-# In OpenCode, when session ends:
-messages = [
-    {"role": "user", "content": "Help me with auth"},
-    {"role": "assistant", "content": "I'll help with..."}
-]
-memory_save(session_id="abc123", messages_json=json.dumps(messages))
-```
-
-### Option B: Use memory_save_direct
-
-For quick manual saves:
+Manually compile any uncompiled daily logs into knowledge articles (don't wait until 6 PM).
 
 ```
-You: memory_save_direct content="Learned about Supabase RLS policies today"
+You: memory_compile
 ```
 
-### Option C: Database Access (Future)
+### `memory_lint`
 
-Directly read from OpenCode's SQLite database:
+Health-check the knowledge base for broken links, orphan pages, and sparse articles.
 
-```python
-# MCP tool that reads from OpenCode DB
-def memory_save_from_db(session_id: str) -> str:
-    import sqlite3
-    db_path = Path.home() / ".opencode" / "data" / "opencode.db"
-    conn = sqlite3.connect(db_path)
-    # Query messages table
-    messages = conn.execute(
-        "SELECT role, parts FROM messages WHERE session_id = ?", 
-        (session_id,)
-    ).fetchall()
-    # Format and save...
 ```
+You: memory_lint
+```
+
+### `memory_status`
+
+View system statistics.
+
+```
+You: memory_status
+```
+
+## Typical Workflow
+
+1. **Work** in OpenCode normally for an hour
+2. **Session ends** → automatically captured to daily log
+3. **Next day, start new session** → memory injected automatically, OpenCode knows what happened
+4. **Query**: "memory_query 'What did we decide about auth?'" → cited answer from knowledge base
+5. **After 6 PM** (or manually): daily logs compiled into wiki articles
+
+## Costs
+
+| Operation | Cost |
+|-----------|------|
+| Session capture (extract) | ~$0.01-0.03 |
+| Compile one daily log | $0.40-0.60 |
+| Query (no file-back) | ~$0.10-0.20 |
+| Lint (structural) | $0.00 |
+
+Costs vary based on your configured model.
 
 ## Testing Your Integration
 
-### 1. Test MCP Server Directly
-
-```bash
-# Test status tool
-python -c "from scripts.mcp_server import memory_status; print(memory_status())"
-
-# Test query tool
-python -c "from scripts.mcp_server import memory_query; print(memory_query('What is auth?'))"
-```
-
-### 2. Test Save and Compile
-
-```bash
-# Save content
-python -c "from scripts.mcp_server import memory_save_direct; print(memory_save_direct('Test knowledge'))"
-
-# Compile
-python scripts/compile.py
-```
-
-### 3. Test Full Pipeline
-
-1. Save content: `memory_save_direct`
-2. Compile: `memory_compile`
-3. Query: `memory_query`
-4. Check status: `memory_status`
-
-## Automation Options
-
-### Option A: User-Triggered (Current)
-
-Users explicitly call memory tools when they want to save/query.
-
-### Option B: Custom Commands
-
-Create `.opencode/commands/memory-save.md`:
-
-```
-MEMORY SAVE
-
-Save the current session to memory.
-
-RUN scripts/mcp_server.py memory_save_direct content="$CONTENT"
-```
-
-Then in OpenCode, press `Ctrl+K` and type `user:memory-save`.
-
-### Option C: Periodic Trigger (Future)
-
-Run a background service that periodically:
-1. Checks OpenCode's database for new sessions
-2. Calls `memory_save` for each new session
-3. Triggers `memory_compile` after hours
-
-## Cost Management
-
-Track costs in `state/state.json`. Expected costs (with real LLM):
-
-- Compile: $0.40-0.60 per daily log
-- Query: $0.10-0.20 (no file-back), $0.20-0.35 (with file-back)
-- Flush: $0.01-0.03 per session
-- Lint: $0.10-0.20 (full), $0.00 (structural only)
-
-## Switching to Real LLM Backend
-
-The system currently uses mock backend. To use real LLMs:
-
-### 1. Set Environment Variables
-
-```bash
-export OPENAI_API_KEY="sk-..."
-# or
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-### 2. Update config.py
-
-```python
-# In scripts/config.py
-LLM_BACKEND = os.getenv("LLM_BACKEND", "openai")  # or "anthropic"
-```
-
-### 3. Test
-
-```bash
-python scripts/query.py "What is auth?"
-```
-
-You should see real API costs in the output.
-
-## What "Fully Operational" Looks Like
-
-When integration is complete, a typical workflow:
-
-1. **User works** in Opencode for an hour
-2. **User says**: "Save session to memory"
-3. **MCP calls** `memory_save_direct` with session content
-4. **Background**: `flush.py` extracts key knowledge bullets
-5. **After 6 PM**: `compile.py` runs automatically, creates knowledge articles
-6. **User queries**: "How do I handle auth?"
-7. **MCP calls** `memory_query`, returns answer with citations
-
-All without any manual intervention beyond the initial setup.
+1. Start an OpenCode session
+2. Do some work (ask questions, explore code, etc.)
+3. End the session
+4. Check that `daily/` has a new log file for today's date
+5. Run `memory_compile` to create knowledge articles
+6. Run `memory_status` to see the counts
+7. Start a new session — verify memory was injected
 
 ## Troubleshooting
 
-### MCP Server Not Found
-- Check `.opencode.json` path is correct
-- Try absolute path to `scripts/mcp_server.py`
+### Nothing captured after session
+- Ensure the plugin file is in `.opencode/plugins/` or `~/.config/opencode/plugins/`
+- Check that OpenCode loaded the plugin on startup
+- Verify the session had at least 2 messages (very short sessions are skipped)
 
-### Tool Call Fails
-- Run MCP server standalone to see errors
-- Check `scripts/` directory exists and is readable
+### Query returns nothing
+- Run `memory_compile` first to create articles from daily logs
+- Check `knowledge/index.md` exists and has entries
 
-### Save Doesn't Work
-- Check `daily/` directory is writable
-- Verify date format in daily log
+### Compile takes too long
+- The LLM is processing the daily log — this is expected for longer sessions
+- The plugin uses your configured model; a faster model will compile quicker
 
-### Query Returns Nothing
-- Run `memory_compile` first to create articles
-- Check `knowledge/index.md` exists
+### Memory not injected at session start
+- There may be no knowledge base yet — compile some daily logs first
+- Check `knowledge/index.md` exists and has content
 
-## Files Reference
+## File Structure
 
-| File | Purpose |
-|------|---------|
-| `scripts/mcp_server.py` | MCP server implementation |
-| `scripts/compile.py` | Daily log → knowledge articles |
-| `scripts/query.py` | Query knowledge base |
-| `scripts/flush.py` | Extract knowledge from sessions |
-| `scripts/lint.py` | Health checks |
-| `scripts/llm_backend.py` | LLM backend (mock/openai/anthropic) |
-| `scripts/config.py` | Configuration |
-| `AGENTS.md` | Article schemas and formats |
+```
+.
+├── .opencode/
+│   └── plugins/
+│       └── memory.ts             # The entire system
+├── AGENTS.md                     # Knowledge base schema
+├── daily/                        # Raw conversation logs (gitignored)
+├── knowledge/
+│   ├── index.md                 # Master catalog
+│   ├── log.md                   # Append-only build log
+│   ├── concepts/                # Compiled wiki articles
+│   ├── connections/             # Cross-cutting insights
+│   └── qa/                      # Saved Q&A articles
+└── state/
+    └── state.json               # Compilation state (gitignored)
+```
 
 ## Need Help?
 
-- See `AGENTS.md` for complete schema and conventions
-- See `scripts/config.py` for all configurable constants
-- Check `state/state.json` for runtime state and cost tracking
-
-Good luck!
+- See the [README](README.md) for quick start instructions
+- See `AGENTS.md` for complete article schema and conventions
+- The plugin code is well-commented for those who want to customize behavior

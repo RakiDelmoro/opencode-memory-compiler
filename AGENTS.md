@@ -1,10 +1,10 @@
 # AGENTS.md - Opencode Memory System Schema
 
-> **Status**: This is a complete blueprint requiring Opencode Agent SDK integration.
-> See [INTEGRATION.md](../INTEGRATION.md) for details on making the system operational.
-> 
-> Adapted from [Andrej Karpathy's LLM Knowledge Base](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture.
-> Instead of ingesting external articles, this system compiles knowledge from your own Opencode conversations.
+> **Implemented by:** `.opencode/plugins/memory.ts` — no Python, no external APIs, no shell scripts.
+> The plugin uses `client.session.prompt()` to perform all LLM operations.
+>
+> Adapted from [Andrej Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture.
+> Instead of ingesting external articles, this system compiles knowledge from your own OpenCode conversations.
 
 ## The Compiler Analogy
 
@@ -24,7 +24,7 @@ You don't manually organize your knowledge. You have conversations, and the LLM 
 
 ### Layer 1: `daily/` - Conversation Logs (Immutable Source)
 
-Daily logs capture what happened in your Opencode sessions. These are the "raw sources" - append-only, never edited after the fact.
+Daily logs capture what happened in your OpenCode sessions. These are the "raw sources" — append-only, never edited after the fact.
 
 ```
 daily/
@@ -33,34 +33,7 @@ daily/
 ├── ...
 ```
 
-Each file follows this format:
-
-```markdown
-# Daily Log: YYYY-MM-DD
-
-## Sessions
-
-### Session (HH:MM) - Brief Title
-
-**Context:** What the user was working on.
-
-**Key Exchanges:**
-- User asked about X, assistant explained Y
-- Decided to use Z approach because...
-- Discovered that W doesn't work when...
-
-**Decisions Made:**
-- Chose library X over Y because...
-- Architecture: went with pattern Z
-
-**Lessons Learned:**
-- Always do X before Y to avoid...
-- The gotcha with Z is that...
-
-**Action Items:**
-- [ ] Follow up on X
-- [ ] Refactor Y when time permits
-```
+Captured automatically on `session.idle` by the plugin.
 
 ### Layer 2: `knowledge/` - Compiled Knowledge (LLM-Owned)
 
@@ -85,7 +58,7 @@ The schema that tells the LLM how to compile and maintain the knowledge base. Th
 
 ### `knowledge/index.md` - Master Catalog
 
-A table listing every knowledge article. This is the primary retrieval mechanism - the LLM reads this FIRST when answering any query, then selects relevant articles to read in full.
+A table listing every knowledge article. This is the primary retrieval mechanism — the LLM reads this FIRST when answering any query, then selects relevant articles to read in full.
 
 Format:
 
@@ -238,7 +211,7 @@ word_count: 156
 
 ## Core Operations
 
-### 1. Compile (daily/ -> knowledge/)
+### 1. Compile (daily/ → knowledge/)
 
 When processing a daily log:
 
@@ -255,8 +228,8 @@ When processing a daily log:
 **Important guidelines:**
 - A single daily log may touch 3-10 knowledge articles
 - Prefer updating existing articles over creating near-duplicates
-- Use Obsidian-style `[[wikilinks]]` with full relative paths from knowledge/
-- Write in encyclopedia style - factual, concise, self-contained
+- Use Obsidian-style `[[wikilinks]]` with full relative paths from `knowledge/`
+- Write in encyclopedia style — factual, concise, self-contained
 - Every article must have YAML frontmatter
 - Every article must link back to its source daily logs
 
@@ -272,15 +245,11 @@ When processing a daily log:
 
 ### 3. Lint (Health Checks)
 
-Seven checks, run periodically:
+Checks run periodically:
 
-1. **Broken links** - `[[wikilinks]]` pointing to non-existent articles
-2. **Orphan pages** - Articles with zero inbound links from other articles
-3. **Orphan sources** - Daily logs that haven't been compiled yet
-4. **Stale articles** - Source daily log changed since article was last compiled
-5. **Contradictions** - Conflicting claims across articles (requires LLM judgment)
-6. **Missing backlinks** - A links to B but B doesn't link back to A
-7. **Sparse articles** - Below 200 words, likely incomplete
+1. **Broken links** — `[[wikilinks]]` pointing to non-existent articles
+2. **Orphan pages** — Articles with zero inbound links from other articles
+3. **Sparse articles** — Below 200 words, likely incomplete
 
 Output: a markdown report with severity levels (error, warning, suggestion).
 
@@ -297,120 +266,29 @@ Output: a markdown report with severity levels (error, warning, suggestion).
 
 ---
 
-## Hook System (Automatic Capture)
+## How the Plugin Works
 
-Hooks are configured in `.opencode/settings.json` and fire automatically when you use Opencode in this project.
+The `.opencode/plugins/memory.ts` file orchestrates everything through OpenCode event hooks and tools.
 
-### `.opencode/settings.json` Format
+### Event Hooks
 
-```json
-{
-  "hooks": {
-    "onSessionStart": [{ "hooks": [{ "type": "command", "command": ".opencode/hooks/session-start.sh", "timeout": 10 }] }],
-    "onSessionEnd": [{ "hooks": [{ "type": "command", "command": ".opencode/hooks/session-end.sh", "timeout": 10 }] }],
-    "onBeforeCompact": [{ "hooks": [{ "type": "command", "command": ".opencode/hooks/pre-compact.sh", "timeout": 10 }] }]
-  }
-}
-```
+| Event | What happens |
+|-------|-------------|
+| `session.idle` | Fetches session messages → formats transcript → extracts knowledge → appends to daily log |
+| `session.created` | Reads `knowledge/index.md` → injects into session context (`noReply: true`) |
 
-### Hook Details
+### Tools
 
-**`session-start.sh`** (onSessionStart)
-- Pure local I/O, no API calls, runs in under 1 second
-- Reads `knowledge/index.md` and the most recent daily log
-- Outputs knowledge base context to stdout for Opencode to see at session start
+| Tool | What it does |
+|------|-------------|
+| `memory_query` | Queries the knowledge base — reads index + articles → synthesizes answer with citations |
+| `memory_compile` | Manually compiles uncompiled daily logs into wiki articles |
+| `memory_lint` | Runs health checks on the knowledge base |
+| `memory_status` | Shows system statistics |
 
-**`session-end.sh`** (onSessionEnd)
-- Reads Opencode session transcript (implementation-specific)
-- Copies the session content to a temp file
-- Spawns `flush.py` as a fully detached background process
-- Recursion guard: exits immediately if `OPENCODE_INVOKED_BY` env var is set
+### LLM Calls
 
-**`pre-compact.sh`** (onBeforeCompact)
-- Same architecture as session-end.sh
-- Fires before Opencode auto-compacts the context window
-- Critical for long sessions: captures context before summarization discards it
-
-### Background Flush Process (`flush.py`)
-
-Spawned by both hooks as a fully detached background process:
-- **Windows:** Appropriate flags for process detachment
-- **Mac/Linux:** `start_new_session=True`
-
-This ensures flush.py survives after Opencode's hook process exits.
-
-**What flush.py does:**
-1. Sets `OPENCODE_INVOKED_BY=memory_flush` env var (prevents recursive hook firing)
-2. Reads the pre-extracted session context from the temp file
-3. Skips if context is empty or if same session was flushed within 60 seconds (deduplication)
-4. Calls Opencode's agent equivalent (`query()` with appropriate parameters)
-5. Opencode decides what's worth saving - returns structured bullet points or `FLUSH_OK`
-6. Appends result to `daily/YYYY-MM-DD.md`
-7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 6 PM local time and today's daily log has changed since its last compilation, spawns `compile.py` as another detached background process
-
----
-
-## Script Details
-
-### compile.py - The Compiler
-
-Uses the Opencode Agent SDK's async streaming query mechanism:
-
-- Builds a prompt with: AGENTS.md schema, current index, all existing articles, and the daily log
-- Opencode reads the daily log, decides what concepts to extract, and writes files directly
-- Auto-approves all file operations (equivalent to permission_mode="acceptEdits")
-- Incremental: tracks SHA-256 hashes of daily logs in `state.json`, skips unchanged files
-- Cost tracking included in state management
-
-### query.py - Index-Guided Retrieval
-
-Loads the entire knowledge base into context (index + all articles). No RAG.
-
-At personal KB scale (50-500 articles), the LLM reading a structured index outperforms vector similarity. The LLM understands what the question is really asking and selects pages accordingly. Embeddings find similar words; the LLM finds relevant concepts.
-
-### lint.py - Health Checks
-
-Seven checks as described above, with detailed reporting.
-
----
-
-## State Tracking
-
-`state/state.json` tracks:
-- `ingested` - map of daily log filenames to SHA-256 hashes, compilation timestamps, and costs
-- `query_count` - total queries run
-- `last_lint` - timestamp of most recent lint
-- `total_cost` - cumulative API cost
-
-`state/last-flush.json` tracks flush deduplication (session_id + timestamp).
-
-Both are gitignored and regenerated automatically.
-
----
-
-## Dependencies
-
-`pyproject.toml` (at project root):
-- Opencode Agent SDK or equivalent for LLM calls with tool use
-- python-dotenv for environment variable management
-- tzdata for timezone data
-- Python 3.12+, managed by uv
-
-No separate API key needed - uses Opencode's built-in credentials.
-
----
-
-## Costs
-
-| Operation | Cost Estimate |
-|-----------|---------------|
-| Compile one daily log | $0.40-0.60 |
-| Query (no file-back) | ~$0.10-0.20 |
-| Query (with file-back) | ~$0.20-0.35 |
-| Full lint (with contradictions) | ~$0.10-0.20 |
-| Structural lint only | $0.00 |
-| Memory flush (per session) | ~$0.01-0.03 |
+All LLM operations use `client.session.prompt()` — the plugin creates temporary sessions for processing, then cleans them up. This uses your configured OpenCode model with **no separate API keys**.
 
 ---
 
@@ -418,11 +296,11 @@ No separate API key needed - uses Opencode's built-in credentials.
 
 ### Additional Article Types
 
-Add directories like `people/`, `projects/`, `tools/` to `knowledge/`. Define the article format in this file (AGENTS.md) and update the scripts to include them.
+Add directories like `people/`, `projects/`, `tools/` to `knowledge/`. Define the article format in this file (AGENTS.md) and update the plugin to include them.
 
 ### Obsidian Integration
 
-The knowledge base is pure markdown with `[[wikilinks]]` - works natively in Obsidian. Point a vault at `knowledge/` for graph view, backlinks, and search.
+The knowledge base is pure markdown with `[[wikilinks]]` — works natively in Obsidian. Point a vault at `knowledge/` for graph view, backlinks, and search.
 
 ### Scaling Beyond Index-Guided Retrieval
 
@@ -432,6 +310,6 @@ At ~2,000+ articles / ~2M+ tokens, the index becomes too large for the context w
 
 ## Getting Started
 
-See README.md for quick start instructions or copy/paste this prompt into your Opencode session:
+See README.md for quick start instructions or copy/paste this prompt into your OpenCode session:
 
-> "Please set up the automatic knowledge capture system by cloning https://github.com/[YOUR_USERNAME]/opencode-memory-compiler into this project and configuring the hooks."
+> "Please set up the automatic knowledge capture system by cloning https://github.com/[YOUR-USERNAME]/opencode-memory-compiler into this project and copying the plugin to `.opencode/plugins/`."
