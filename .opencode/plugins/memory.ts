@@ -1,18 +1,20 @@
 /**
  * OpenCode Memory Compiler Plugin
  *
- * Captures session transcripts, extracts knowledge, compiles structured
- * wiki articles, and injects memory context into new sessions.
+ * Captures session transcripts by tracking message.part.updated events
+ * in real-time, extracts knowledge, compiles structured wiki articles,
+ * and injects memory context into new sessions.
  *
  * No external API keys or Python scripts required — everything runs
  * through the OpenCode SDK (client.session.prompt()).
  *
  * Architecture (Karpathy LLM Wiki pattern):
- *   raw sources (daily logs)  →  LLM extraction  →  persistent wiki (knowledge/)
- *                                                                         ↑ injected at session start
+ *   raw sources (daily logs)  ->  LLM extraction  ->  persistent wiki (knowledge/)
+ *                                                                         ^ injected at session start
  */
 
 import { type Plugin, tool } from "@opencode-ai/plugin"
+import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
 // ─── Paths (workspace-relative) ───────────────────────────────────
@@ -35,37 +37,74 @@ export const MemoryPlugin: Plugin = async ({
   $,
 }) => {
   const root = directory ?? "."
+  const absRoot = path.resolve(root)
+
+  // ── In-memory session tracking ─────────────────────────────────
+  // Track message parts by ID (avoids duplicates from streaming updates)
+  const sessionParts: Map<string, { role: string; text: string; order: number }> = new Map()
+  // Track message roles from message.updated events (parts don't carry role)
+  const messageRoles: Map<string, string> = new Map()
+  let eventCounter = 0
+
+  // Also track the last known session ID for fallback
+  let activeSession: string | null = null
 
   // ── helpers ───────────────────────────────────────────────────
 
+  async function debugLog(msg: string): Promise<void> {
+    const logFile = path.join(absRoot, STATE_DIR, "debug.log")
+    const line = `[${new Date().toISOString()}] ${msg}\n`
+    try {
+      await fs.mkdir(path.join(absRoot, STATE_DIR), { recursive: true })
+      let existing = ""
+      try { existing = await fs.readFile(logFile, "utf-8") } catch {}
+      const trimmed = existing.length > 100000 ? existing.slice(existing.length - 100000) : existing
+      await fs.writeFile(logFile, line + trimmed, "utf-8")
+    } catch {
+      // debug log failure is non-fatal
+    }
+  }
+
   async function ensureDirs(): Promise<void> {
-    await $`mkdir -p ${root}/${DAILY_DIR} ${root}/${KNOWLEDGE_DIR}/${CONCEPTS_SUB} ${root}/${KNOWLEDGE_DIR}/${CONNECTIONS_SUB} ${root}/${KNOWLEDGE_DIR}/${QA_SUB} ${root}/${STATE_DIR}`
+    await fs.mkdir(path.join(absRoot, DAILY_DIR), { recursive: true })
+    await fs.mkdir(path.join(absRoot, KNOWLEDGE_DIR, CONCEPTS_SUB), { recursive: true })
+    await fs.mkdir(path.join(absRoot, KNOWLEDGE_DIR, CONNECTIONS_SUB), { recursive: true })
+    await fs.mkdir(path.join(absRoot, KNOWLEDGE_DIR, QA_SUB), { recursive: true })
+    await fs.mkdir(path.join(absRoot, STATE_DIR), { recursive: true })
   }
 
   async function readText(relPath: string): Promise<string> {
     try {
-      return await Bun.file(`${root}/${relPath}`).text()
+      return await fs.readFile(path.join(absRoot, relPath), "utf-8")
     } catch {
       return ""
     }
   }
 
   async function writeText(relPath: string, content: string): Promise<void> {
-    const abs = `${root}/${relPath}`
-    const dir = abs.substring(0, abs.lastIndexOf("/"))
-    await $`mkdir -p ${dir}`
-    await Bun.write(abs, content)
+    const abs = path.join(absRoot, relPath)
+    await fs.mkdir(path.dirname(abs), { recursive: true })
+    await fs.writeFile(abs, content, "utf-8")
   }
 
-  function sha256(content: string): string {
-    const encoder = new TextEncoder()
-    const data = encoder.encode(content)
-    // Simple hash for deduplication purposes
+  async function listDirSafe(relDir: string): Promise<string[]> {
+    try {
+      const abs = path.join(absRoot, relDir)
+      const entries = await fs.readdir(abs, { withFileTypes: true })
+      return entries.filter(e => e.isFile()).map(e => e.name)
+    } catch (err) {
+      await debugLog(`listDirSafe error: ${relDir} -> ${err}`)
+      return []
+    }
+  }
+
+  function hashStr(content: string): string {
     let h1 = 0xdeadbeef
     let h2 = 0x41c6ce57
-    for (let i = 0; i < data.length; i++) {
-      h1 = 31 * h1 + data[i] * 307
-      h2 = 31 * h2 + data[i] * 307
+    for (let i = 0; i < content.length; i++) {
+      const c = content.charCodeAt(i)
+      h1 = 31 * h1 + c * 307
+      h2 = 31 * h2 + c * 307
     }
     return (
       Math.abs(h1).toString(16).padStart(8, "0") +
@@ -85,41 +124,69 @@ export const MemoryPlugin: Plugin = async ({
     await writeText(STATE_FILE, JSON.stringify(state, null, 2))
   }
 
-  async function listDirSafe(relDir: string): Promise<string[]> {
-    try {
-      const { stdout } = await $`ls ${root}/${relDir}`.nothrow()
-      return stdout.trim().split("\n").filter(Boolean)
-    } catch {
-      return []
-    }
-  }
-
   // ── LLM helper ──────────────────────────────────────────────
-  // Creates a temporary session, sends a prompt, returns the text response.
-  // Uses the user's configured model (no external keys).
+  // The OpenCode SDK wraps all responses under a `data` key:
+  //   { data: { id: "ses_xxx", ... }, request: {}, response: {} }
+  // We must unwrap before accessing fields.
   async function callLLM(prompt: string): Promise<string> {
     let sessionId = ""
     try {
-      const created = await client.session.create({
+      await debugLog(`callLLM: creating temp session`)
+      const rawCreate: any = await client.session.create({
         body: { title: "[memory-agent]" },
       })
-      sessionId = created.id
+      const created = rawCreate?.data ?? rawCreate
+      sessionId = created?.id ?? ""
+      await debugLog(`callLLM: session created, id=${sessionId}, rawKeys=${JSON.stringify(Object.keys(rawCreate ?? {}))}`)
 
-      const result: any = await client.session.prompt({
+      if (!sessionId.startsWith("ses_")) {
+        throw new Error(`session.create returned invalid ID: ${JSON.stringify(rawCreate)}`)
+      }
+
+      await debugLog(`callLLM: sending prompt (${prompt.length} chars) to session ${sessionId}`)
+      const rawResult: any = await client.session.prompt({
         path: { id: sessionId },
         body: {
           parts: [{ type: "text", text: prompt }],
         },
       })
 
+      // Unwrap SDK response
+      const result = rawResult?.data ?? rawResult
+      const resultKeys = Object.keys(result ?? {})
+      await debugLog(`callLLM: result keys: ${JSON.stringify(resultKeys)}`)
+
+      // Check for error responses at both levels
+      if (rawResult?.error) throw new Error(`LLM API error: ${JSON.stringify(rawResult.error)}`)
+      if (result?.error) throw new Error(`LLM data error: ${JSON.stringify(result.error)}`)
+
+      // Try multiple response formats
+      let text = ""
+
+      // Format 1: result.parts
       const parts = result?.parts ?? []
-      const text = parts
+      text = parts
         .filter((p: any) => p?.type === "text" || p?.type === "part.text")
         .map((p: any) => p?.text ?? "")
         .join("\n")
 
+      // Format 2: result.content (array)
+      if (!text && Array.isArray(result?.content)) {
+        text = result.content
+          .filter((p: any) => p?.type === "text")
+          .map((p: any) => p?.text ?? "")
+          .join("\n")
+      }
+
+      // Format 3: result.content (string)
+      if (!text && typeof result?.content === "string") {
+        text = result.content
+      }
+
+      await debugLog(`callLLM: got response (${text.length} chars)`)
       return text || ""
     } catch (err) {
+      await debugLog(`callLLM ERROR: ${(err as Error)?.message ?? err}`)
       await client.app.log({
         body: {
           service: "memory-compiler",
@@ -130,15 +197,14 @@ export const MemoryPlugin: Plugin = async ({
       return ""
     } finally {
       if (sessionId) {
-        await client.session.delete({ path: { id: sessionId } }).catch(() => {})
+        try {
+          await client.session.delete({ sessionID: sessionId })
+        } catch {}
       }
     }
   }
 
-  /*  Parse LLM responses containing file-write blocks.  Format:
-      ---NEWFILE: path/to/file.md---
-      <file content goes here>
-  */
+  /*  Parse LLM responses containing file-write blocks.  */
   function parseFileBlocks(response: string): Array<{ path: string; content: string }> {
     const blocks: Array<{ path: string; content: string }> = []
     const re = /---NEWFILE:\s*(.+?)---\n([\s\S]*?)(?=---NEWFILE:|$)/g
@@ -164,82 +230,117 @@ export const MemoryPlugin: Plugin = async ({
     return articles
   }
 
+  // ── Extract session ID from event properties ─────────────────
+  function extractSessionId(ev: { properties?: any }): string | null {
+    const p = ev.properties ?? {}
+    return p.sessionID
+      ?? p.id
+      ?? p.session?.id
+      ?? p.info?.id
+      ?? null
+  }
+
   // ── 1) Memory injection at session start ──────────────────────
   async function injectMemory(sessionId: string): Promise<void> {
     const indexContent = await readText(INDEX_FILE)
     if (!indexContent) return
 
-    await client.session.prompt({
-      path: { id: sessionId },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text:
-              `## Your Knowledge Base\n\nYou have a persistent knowledge base compiled from past coding sessions. ` +
-              `Reference these articles when relevant — this is your memory.\n\n` +
-              `\`\`\`\n${indexContent}\n\`\`\``,
-          },
-        ],
-        noReply: true,
-      },
-    }).catch(() => {})
+    await debugLog(`injectMemory: injecting ${indexContent.length} chars into session ${sessionId}`)
+    try {
+      await client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          parts: [
+            {
+              type: "text",
+              text:
+                `## Your Knowledge Base\n\nYou have a persistent knowledge base compiled from past coding sessions. ` +
+                `Reference these articles when relevant — this is your memory.\n\n` +
+                `\`\`\`\n${indexContent}\n\`\`\``,
+            },
+          ],
+          noReply: true,
+        },
+      })
+    } catch (err) {
+      debugLog(`injectMemory error: ${err}`)
+    }
   }
 
-  // ── 2) Session capture on idle ──────────────────────────────────
+  // ── 2) Session capture ──────────────────────────────────────
+  function getMessagesForSession(sessionId: string): Array<{ role: string; text: string; order: number }> {
+    const msgs: Array<{ role: string; text: string; order: number }> = []
+    for (const [key, val] of sessionParts.entries()) {
+      if (key.startsWith(`${sessionId}:`)) {
+        msgs.push(val)
+      }
+    }
+    return msgs.sort((a, b) => a.order - b.order)
+  }
+
   async function captureSession(sessionId: string): Promise<void> {
+    await debugLog(`captureSession(${sessionId}) called`)
     await ensureDirs()
 
-    let msgs: Array<any> = []
-    try {
-      const response: any = await client.session.messages({ path: { id: sessionId } })
-      msgs = Array.isArray(response) ? response : response?.messages ?? []
-    } catch (err) {
-      await client.app.log({
-        body: { service: "memory-compiler", level: "error", message: `Failed to fetch messages: ${(err as Error)?.message}` },
-      })
+    const msgs = getMessagesForSession(sessionId)
+    await debugLog(`tracked messages for session: ${msgs.length}`)
+    if (msgs.length > 0) {
+      const sampleRoles = msgs.map(m => `${m.role}:${m.text.slice(0, 20)}`).join(", ")
+      await debugLog(`sample: ${sampleRoles}`)
+    }
+
+    if (msgs.length < 2) {
+      await debugLog(`skipping: only ${msgs.length} messages with text (need 2+)`)
       return
     }
 
-    if (msgs.length < 2) return
-
     const now = new Date()
     const transcript = msgs
-      .map((m: any) => {
-        const role = ((m?.info?.role ?? m?.role ?? "unknown") as string).toUpperCase()
-        const parts = m?.parts ?? []
-        const texts = parts
-          .filter((p: any) => p?.type === "text")
-          .map((p: any) => {
-            const t = typeof p?.text === "string" ? p.text : ""
-            return t.length > 2000 ? t.slice(0, 2000) + "…[truncated]" : t
-          })
-          .filter(Boolean)
-          .join("\n")
-        return texts ? `**${role}:** ${texts}` : ""
+      .map((m) => {
+        const t = m.text.length > 2000 ? m.text.slice(0, 2000) + "…[truncated]" : m.text
+        return t ? `**${m.role.toUpperCase()}:** ${t}` : ""
       })
       .filter(Boolean)
       .join("\n\n---\n\n")
 
-    if (!transcript.trim()) return
+    if (!transcript.trim()) {
+      await debugLog(`skipping: empty transcript`)
+      return
+    }
 
     const today = now.toISOString().split("T")[0]
     const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    const title = (msgs[0]?.info?.sessionTitle ?? sessionId).slice(0, 50)
+    const title = (msgs[0]?.text?.slice(0, 50) ?? sessionId).slice(0, 50)
     const logFile = `${DAILY_DIR}/${today}.md`
 
+    await debugLog(`writing to ${logFile} (transcript: ${transcript.length} chars, title: ${title})`)
     const existing = await readText(logFile)
     const header = existing === "" ? `# Daily Log: ${today}\n\n## Sessions\n` : ""
     const entry = `\n\n### Session (${time}) - ${title}\n\n${transcript}\n`
     await writeText(logFile, existing + header + entry)
+    await debugLog(`wrote ${logFile} successfully`)
 
+    // Extract knowledge via LLM
+    await debugLog(`extracting knowledge from transcript...`)
     const extracted = await extractKnowledge(transcript, time, title)
     if (extracted) {
+      await debugLog(`extracted knowledge (${extracted.length} chars), appending to ${logFile}`)
       const updated = await readText(logFile)
       await writeText(logFile, updated + `\n${extracted}\n`)
+      await debugLog(`appended knowledge to ${logFile}`)
+    } else {
+      await debugLog(`no significant knowledge extracted`)
     }
 
+    // Maybe compile (auto-compile after 6 PM)
+    await debugLog(`checking if should compile...`)
     await maybeCompile()
+    await debugLog(`captureSession(${sessionId}) complete`)
+
+    // Clean up tracked parts for this session
+    for (const key of sessionParts.keys()) {
+      if (key.startsWith(`${sessionId}:`)) sessionParts.delete(key)
+    }
   }
 
   async function extractKnowledge(
@@ -290,13 +391,17 @@ Return ONLY these sections (or "No significant knowledge extracted." if nothing 
     for (const log of logs) {
       const content = await readText(`${DAILY_DIR}/${log}`)
       if (!content.trim()) continue
-      const hash = sha256(content)
+      const hash = hashStr(content)
       if (state.ingested?.[log]?.hash === hash) continue
       try {
-        await compileDailyLog(log)
-        state.ingested = state.ingested || {}
-        state.ingested[log] = { hash, compiled_at: Date.now() }
-        compiled++
+        const success = await compileDailyLog(log)
+        if (success) {
+          state.ingested = state.ingested || {}
+          state.ingested[log] = { hash, compiled_at: Date.now() }
+          compiled++
+        } else {
+          await debugLog(`maybeCompile: compileDailyLog(${log}) returned false, not marking as ingested`)
+        }
       } catch (err) {
         await client.app.log({
           body: { service: "memory-compiler", level: "error", message: `Compile failed ${log}: ${(err as Error)?.message}` },
@@ -311,9 +416,9 @@ Return ONLY these sections (or "No significant knowledge extracted." if nothing 
     }
   }
 
-  async function compileDailyLog(logName: string): Promise<void> {
+  async function compileDailyLog(logName: string): Promise<boolean> {
     const logContent = await readText(`${DAILY_DIR}/${logName}`)
-    if (!logContent.trim()) return
+    if (!logContent.trim()) return false
 
     const schema = await readText(AGENTS_FILE)
     const indexContent = await readText(INDEX_FILE)
@@ -377,18 +482,29 @@ word_count: 180
 Begin compilation now.`
 
     const response = await callLLM(prompt)
-    if (!response) return
+    if (!response) return false
 
     const files = parseFileBlocks(response)
+    if (!files.length) {
+      await debugLog(`compileDailyLog: no file blocks parsed from LLM response`)
+      return false
+    }
+
+    let wroteFiles = 0
     for (const file of files) {
       const safe = file.path.startsWith(KNOWLEDGE_DIR)
       if (!safe) continue
       await writeText(file.path, file.content)
+      await debugLog(`compileDailyLog wrote: ${file.path}`)
+      wroteFiles++
     }
+
+    if (wroteFiles === 0) return false
 
     const state = await loadState()
     state.last_compile = Date.now()
     await saveState(state)
+    return true
   }
 
   // ── 4) Tools ────────────────────────────────────────────────────
@@ -396,12 +512,56 @@ Begin compilation now.`
     // ── Event hooks ──
     event: async (input: { event: { type: string; properties?: any } }) => {
       const { event } = input
-      if (event.type === "session.idle") {
-        const sid = event.properties?.info?.id
-        if (sid) setTimeout(() => captureSession(sid), 5000)
+      const sid = extractSessionId(event)
+      if (sid) activeSession = sid
+
+      // Track message roles from message.updated events
+      if (event.type === "message.updated") {
+        const msgId = event.properties?.info?.id ?? event.properties?.messageID
+        const role = event.properties?.info?.role
+        if (msgId && role) {
+          messageRoles.set(msgId, role)
+        }
       }
+
+      // Track text-type message parts in real-time — deduplicated by part.id
+      if (event.type === "message.part.updated") {
+        const p = event.properties
+        const sessionID = p?.sessionID ?? p?.part?.sessionID ?? activeSession
+        const part = p?.part
+
+        if (sessionID && part?.id && part.type === "text" && part.text?.trim()) {
+          const msgId = part.messageID ?? ""
+          const role = messageRoles.get(msgId) ?? "user"
+
+          const key = `${sessionID}:${part.id}`
+          const existingEntry = sessionParts.get(key)
+          sessionParts.set(key, {
+            role,
+            text: part.text.trim(),
+            order: existingEntry?.order ?? eventCounter++,
+          })
+          await debugLog(`tracked[${sessionID}]: ${role} text (${part.text.trim().length} chars) partId=${part.id}`)
+        }
+      }
+
+      if (event.type === "session.compacted") {
+        await debugLog(`session.compacted handler: sid=${sid ?? "(null)"}`)
+        await client.app.log({ body: { service: "memory-compiler", level: "info", message: `session.compacted received, sid=${sid}` } })
+        if (sid) await captureSession(sid)
+      }
+
+      if (event.type === "session.idle") {
+        const captureSid = sid ?? activeSession
+        await debugLog(`session.idle handler: sid=${captureSid}`)
+        await client.app.log({ body: { service: "memory-compiler", level: "info", message: `session.idle received, sid=${captureSid}` } })
+        if (captureSid) await captureSession(captureSid)
+        activeSession = null
+      }
+
       if (event.type === "session.created") {
-        const sid = event.properties?.info?.id
+        await debugLog(`session.created handler: sid=${sid}`)
+        await client.app.log({ body: { service: "memory-compiler", level: "info", message: `session.created received, sid=${sid}` } })
         if (sid) setTimeout(() => injectMemory(sid), 1000)
       }
     },
@@ -445,28 +605,37 @@ ${articlesSummary}`
         args: {},
         async execute(): Promise<string> {
           await ensureDirs()
+          await debugLog(`memory_compile called`)
           const state = await loadState()
-          const logs = (await listDirSafe(DAILY_DIR)).filter((f) => f.endsWith(".md"))
+          const logs = await listDirSafe(DAILY_DIR)
+          await debugLog(`memory_compile found logs: ${JSON.stringify(logs)}`)
+          const mdLogs = logs.filter((f) => f.endsWith(".md"))
 
-          if (!logs.length) return "No daily logs found."
+          if (!mdLogs.length) return `No daily logs found in ${DAILY_DIR}/. Make sure the plugin captured at least one session.`
 
           let compiled = 0
-          for (const log of logs) {
+          let failed = 0
+          for (const log of mdLogs) {
             const content = await readText(`${DAILY_DIR}/${log}`)
-            const hash = sha256(content)
+            const hash = hashStr(content)
             if (state.ingested?.[log]?.hash === hash) continue
-            try {
-              await compileDailyLog(log)
+            const success = await compileDailyLog(log)
+            if (success) {
+              await debugLog(`memory_compile: successfully compiled ${log}`)
               state.ingested = state.ingested || {}
               state.ingested[log] = { hash, compiled_at: Date.now() }
               compiled++
-            } catch {}
+            } else {
+              await debugLog(`memory_compile: compileDailyLog(${log}) returned false`)
+              failed++
+            }
           }
 
           await saveState(state)
-          return compiled > 0
-            ? `✅ Compiled ${compiled} daily log(s) into knowledge articles.`
-            : "All daily logs already compiled. Nothing new to process."
+          if (compiled > 0 && failed === 0) return `✅ Compiled ${compiled} daily log(s) into knowledge articles.`
+          if (compiled > 0 && failed > 0) return `⚠️ Compiled ${compiled} daily log(s), but ${failed} failed. Check state/debug.log for details.`
+          if (failed > 0) return `❌ Compilation failed for ${failed} log(s). LLM returned empty responses — check your model configuration. Check state/debug.log.`
+          return "All daily logs already compiled. Nothing new to process."
         }
       }),
 
@@ -521,7 +690,9 @@ ${articlesSummary}`
         async execute(): Promise<string> {
           await ensureDirs()
           const state = await loadState()
-          const logs = (await listDirSafe(DAILY_DIR)).filter((f) => f.endsWith(".md"))
+          const logs = await listDirSafe(DAILY_DIR)
+          await debugLog(`memory_status: daily dir has ${logs.length} files: ${JSON.stringify(logs)}`)
+          const mdLogs = logs.filter((f) => f.endsWith(".md"))
           const concepts = (await listDirSafe(`${KNOWLEDGE_DIR}/${CONCEPTS_SUB}`)).filter((f) => f.endsWith(".md"))
           const connections = (await listDirSafe(`${KNOWLEDGE_DIR}/${CONNECTIONS_SUB}`)).filter((f) => f.endsWith(".md"))
           const qa = (await listDirSafe(`${KNOWLEDGE_DIR}/${QA_SUB}`)).filter((f) => f.endsWith(".md"))
@@ -531,9 +702,9 @@ ${articlesSummary}`
 
 | Metric | Count |
 |--------|-------|
-| Daily logs | ${logs.length} |
+| Daily logs | ${mdLogs.length} |
 | Compiled | ${compiled} |
-| Pending | ${Math.max(0, logs.length - compiled)} |
+| Pending | ${Math.max(0, mdLogs.length - compiled)} |
 | Concept articles | ${concepts.length} |
 | Connection articles | ${connections.length} |
 | Q&A articles | ${qa.length} |
