@@ -1,29 +1,96 @@
 # OpenCode Memory Compiler
 
-Your OpenCode conversations compile themselves into a searchable knowledge base.
+> Give OpenCode a persistent memory. It remembers every conversation, compiles knowledge into a structured wiki, and recalls it at session start.
 
-Adapted from [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture, but instead of clipping web articles, the raw data is your own conversations with OpenCode. When a session ends (or auto-compacts mid-session), a TypeScript plugin captures the conversation transcript and spawns an extraction agent that extracts the important stuff — decisions, lessons learned, patterns, gotchas — and appends it to a daily log. You then compile those daily logs into structured, cross-referenced knowledge articles organized by concept. Retrieval uses a simple index file instead of RAG — no vector database, no embeddings, just markdown.
+**Inspired by:**
+- [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — the persistent, compounding knowledge base pattern
+
+---
+
+## What It Does
+
+| Feature | Description |
+|---------|-------------|
+| **Manual capture** | Sessions → daily log via `memory_capture` tool |
+| **LLM extraction** | Pulls decisions, patterns, lessons from transcripts |
+| **Wiki compilation** | Structured `knowledge/` articles, cross-linked, always current |
+| **Memory injection** | At each new session start → AI reads its knowledge base |
+| **Deep query** | `memory_query` → synthesized answer with citations |
+| **Health checks** | `memory_lint` → finds broken links, orphan pages |
+
+---
+
+## How It Works
+
+```
+Your conversation
+  (manual trigger: memory_capture)
+        ↓
+   daily/YYYY-MM-DD.md          (filtered, append-only)
+        ↓                        (compiled after 6 PM or via tool)
+        ↓
+   LLM compiles daily log
+        ↓
+   knowledge/concepts/*.md       (structured wiki articles)
+   knowledge/connections/*.md    (cross-cutting insights)
+   knowledge/qa/*.md             (saved Q&A)
+   knowledge/index.md            (master catalog)
+        ↑                        (injected at session.start)
+   memory injection
+```
+
+The LLM writes and maintains the wiki. **You never edit it manually.** It compounds over time.
+
+---
 
 ## Quick Start
 
-Tell your AI coding agent:
+### 1. Copy the plugin
 
-> "Clone https://github.com/RakiDelmoro/opencode-memory-compiler into this project.
-> Set up the OpenCode hooks so my conversations automatically get captured into
-> daily logs, compiled into a knowledge base, and retrieved in future sessions.
-> Read OPENCODE.md for the full technical reference on how everything works."
+```bash
+# Project-level (recommended)
+cp -r .opencode/plugins /your-project/.opencode/
 
-The agent will:
+# Or global
+cp -r .opencode/plugins ~/.config/opencode/
+```
 
-1. Clone the repo and run `uv sync` to install dependencies
-2. Register `extraction-plugin.ts` in your `opencode.json` config
-3. The hooks activate automatically next time you open OpenCode
+### 2. That's it
 
-From there, your conversations start accumulating. After 6 PM local time,
-the next session triggers automatic compilation of that day's logs into
-knowledge articles. You can also run `uv run python scripts/compile.py`
-manually at any time.
+Next time you start OpenCode:
+- Sessions are **tracked** but not automatically captured
+- Knowledge is **injected** at the start of new sessions  
+- Use `memory_capture` tool to manually save session to daily log
+- Daily logs are **compiled** automatically after 6 PM or via `memory_compile`
 
-## Technical Reference
+Use tools from any session:
+- `memory_query "How did we handle auth?"` — Ask the wiki
+- `memory_compile` — Compile now (don't wait for 6 PM)
+- `memory_lint` — Health-check the knowledge base
+- `memory_status` — Show statistics
+- `memory_capture` — Manually save session to daily log (with intelligent filtering)
 
-See **[OPENCODE.md](OPENCODE.md)** for the full technical reference: article formats, hook architecture, script internals, costs, and customization options.
+---
+
+## No External Dependencies
+
+- **No Python** — everything is TypeScript/Bun
+- **No separate API keys** — uses OpenCode's configured model
+- **No MCP setup** — the plugin is self-contained
+- **No background processes** — runs within OpenCode's event loop
+
+---
+
+## Tips
+
+- Use `/agent memory_capture` to save valuable conversations to your knowledge base
+- Point **Obsidian** at `knowledge/` for graph view and backlinks
+- Commit `knowledge/` to git for version history
+- Run `memory_compile` manually for immediate results
+- The more you use it, the smarter it gets
+
+---
+
+## License
+
+MIT
