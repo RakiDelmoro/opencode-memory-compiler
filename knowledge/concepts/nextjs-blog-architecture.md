@@ -4,8 +4,6 @@ aliases: [nextjs15-blog, app-router-blog, supabase-nextjs-blog]
 tags: [nextjs, architecture, blog, app-router]
 sources:
   - "daily/2026-04-09.md"
-sources:
-  - "daily/2026-04-09.md"
 created: 2026-04-09
 updated: 2026-04-09
 word_count: 520

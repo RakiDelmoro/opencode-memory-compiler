@@ -33,7 +33,7 @@ daily/
 ├── ...
 ```
 
-Captured automatically on `session.idle` by the plugin.
+Captured manually via `memory_capture` tool.
 
 ### Layer 2: `knowledge/` - Compiled Knowledge (LLM-Owned)
 
@@ -274,7 +274,7 @@ The `.opencode/plugins/memory.ts` file orchestrates everything through OpenCode 
 
 | Event | What happens |
 |-------|-------------|
-| `session.idle` | Fetches session messages → formats transcript → extracts knowledge → appends to daily log |
+| `session.idle` | (Disabled) Was: Fetches session messages → formats transcript → extracts knowledge → appends to daily log |
 | `session.created` | Reads `knowledge/index.md` → injects into session context (`noReply: true`) |
 
 ### Tools
@@ -285,6 +285,7 @@ The `.opencode/plugins/memory.ts` file orchestrates everything through OpenCode 
 | `memory_compile` | Manually compiles uncompiled daily logs into wiki articles |
 | `memory_lint` | Runs health checks on the knowledge base |
 | `memory_status` | Shows system statistics |
+| `memory_capture` | Manually saves session to daily log with intelligent filtering |
 
 ### LLM Calls
 
@@ -312,4 +313,4 @@ At ~2,000+ articles / ~2M+ tokens, the index becomes too large for the context w
 
 See README.md for quick start instructions or copy/paste this prompt into your OpenCode session:
 
-> "Please set up the automatic knowledge capture system by cloning https://github.com/[YOUR-USERNAME]/opencode-memory-compiler into this project and copying the plugin to `.opencode/plugins/`."
+> "Please set up the manual knowledge capture system by cloning https://github.com/[YOUR-USERNAME]/opencode-memory-compiler into this project and copying the plugin to `.opencode/plugins/`."

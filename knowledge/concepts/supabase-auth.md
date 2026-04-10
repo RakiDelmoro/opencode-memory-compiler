@@ -11,7 +11,7 @@ word_count: 487
 
 # Supabase Authentication with Next.js 15
 
-Supabase Authentication integrates with Next.js 15 using the PKCE (Proof Key for Code Exchange) flow, which is the recommended approach for server-side rendered applications. The `@supabase/ssr` package handles cookie-based session management automatically.
+Supabase Authentication integrates with Next.js 15 using the PKCE (Proof Key for Code Exchange) flow, which is the recommended approach for server-side rendered applications. The `@supabase/ssr` package handles cookie-based session management automatically. This approach was selected for the blog platform to ensure secure authentication in a server-rendered environment.
 
 ## Key Points
 

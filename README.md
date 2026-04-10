@@ -11,7 +11,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Auto-capture** | Every session → daily log, automatically |
+| **Manual capture** | Sessions → daily log via `memory_capture` tool |
 | **LLM extraction** | Pulls decisions, patterns, lessons from transcripts |
 | **Wiki compilation** | Structured `knowledge/` articles, cross-linked, always current |
 | **Memory injection** | At each new session start → AI reads its knowledge base |
@@ -24,19 +24,19 @@
 
 ```
 Your conversation
- (session.idle)
-       ↓
-  daily/YYYY-MM-DD.md          (raw, append-only)
-       ↓                        (compiled after 6 PM or via tool)
-       ↓
-  LLM compiles daily log
-       ↓
-  knowledge/concepts/*.md       (structured wiki articles)
-  knowledge/connections/*.md    (cross-cutting insights)
-  knowledge/qa/*.md             (saved Q&A)
-  knowledge/index.md            (master catalog)
-       ↑                        (injected at session.start)
-  memory injection
+  (manual trigger: memory_capture)
+        ↓
+   daily/YYYY-MM-DD.md          (filtered, append-only)
+        ↓                        (compiled after 6 PM or via tool)
+        ↓
+   LLM compiles daily log
+        ↓
+   knowledge/concepts/*.md       (structured wiki articles)
+   knowledge/connections/*.md    (cross-cutting insights)
+   knowledge/qa/*.md             (saved Q&A)
+   knowledge/index.md            (master catalog)
+        ↑                        (injected at session.start)
+   memory injection
 ```
 
 The LLM writes and maintains the wiki. **You never edit it manually.** It compounds over time.
@@ -58,15 +58,17 @@ cp -r .opencode/plugins ~/.config/opencode/
 ### 2. That's it
 
 Next time you start OpenCode:
-- Sessions are **automatically captured** when they go idle
-- Knowledge is **injected** at the start of new sessions
-- Daily logs are **compiled** automatically after 6 PM
+- Sessions are **tracked** but not automatically captured
+- Knowledge is **injected** at the start of new sessions  
+- Use `memory_capture` tool to manually save session to daily log
+- Daily logs are **compiled** automatically after 6 PM or via `memory_compile`
 
 Use tools from any session:
 - `memory_query "How did we handle auth?"` — Ask the wiki
 - `memory_compile` — Compile now (don't wait for 6 PM)
 - `memory_lint` — Health-check the knowledge base
 - `memory_status` — Show statistics
+- `memory_capture` — Manually save session to daily log (with intelligent filtering)
 
 ---
 
@@ -100,23 +102,9 @@ Use tools from any session:
 
 ---
 
-## How This Relates to Karpathy's LLM Wiki
-
-Karpathy's insight: **compilation over retrieval.** Instead of RAG re-discovering answers from scratch, the LLM incrementally builds a persistent wiki that compounds over time.
-
-| Karpathy's Layer | Our Implementation |
-|------------------|-------------------|
-| Raw sources (immutable) | Daily logs from `session.idle` |
-| Wiki (LLM-owned) | `knowledge/` articles, compiled by LLM |
-| Schema (AGENTS.md) | Tells the LLM how to organize |
-| Ingest (auto-capture) | Plugin event hooks, no manual work |
-| Query (ask the wiki) | `memory_query` tool |
-| Lint (health check) | `memory_lint` tool |
-
----
-
 ## Tips
 
+- Use `/agent memory_capture` to save valuable conversations to your knowledge base
 - Point **Obsidian** at `knowledge/` for graph view and backlinks
 - Commit `knowledge/` to git for version history
 - Run `memory_compile` manually for immediate results
