@@ -72,27 +72,6 @@ Use tools from any session:
 
 ---
 
-## Directory Structure
-
-```
-.
-├── .opencode/
-│   └── plugins/
-│       └── memory.ts           # The entire system
-├── AGENTS.md                   # Schema — tells the LLM how to organize
-├── daily/                      # Raw conversation logs (gitignored)
-├── knowledge/
-│   ├── index.md               # Master catalog
-│   ├── log.md                 # Append-only build log
-│   ├── concepts/              # Compiled wiki articles
-│   ├── connections/           # Cross-cutting insights
-│   └── qa/                    # Saved Q&A articles
-└── state/                      # Compilation tracking (gitignored)
-    └── state.json
-```
-
----
-
 ## No External Dependencies
 
 - **No Python** — everything is TypeScript/Bun
