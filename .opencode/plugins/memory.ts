@@ -14,7 +14,7 @@
  */
 
 import { type Plugin } from "@opencode-ai/plugin"
-import * as path from "node:path"
+import * as path from "path"
 
 // Import modules
 import {
@@ -41,7 +41,7 @@ import { getTools } from "./tools"
 export const MemoryPlugin: Plugin = async ({
   client,
   directory,
-}) => {
+}: { client: any; directory?: string }) => {
   const root = directory ?? "."
   const absRoot = path.resolve(root)
 

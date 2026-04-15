@@ -3,7 +3,7 @@
  * Handles converting daily logs to knowledge base articles
  */
 
-import { debugLog, readText, writeText, listDirSafe, hashStr, loadState, saveState } from "./helpers"
+import { debugLog, readText, writeText, listDirSafe, hashStr, loadState, saveState, buildSearchIndex } from "./helpers"
 import { extractKnowledge, callLLM } from "./knowledgeExtraction"
 
 // ─── Parse LLM responses containing file-write blocks ─────────────────────
@@ -31,65 +31,6 @@ export async function readAllArticles(absRoot: string, KNOWLEDGE_DIR: string, CO
     }
   }
   return articles
-}
-
-// ─── Compile Daily Log → Wiki Articles ──────────────────────
-export async function maybeCompile(
-  absRoot: string,
-  DAILY_DIR: string,
-  KNOWLEDGE_DIR: string,
-  CONCEPTS_SUB: string,
-  CONNECTIONS_SUB: string,
-  QA_SUB: string,
-  INDEX_FILE: string,
-  LOG_FILE: string,
-  AGENTS_FILE: string,
-  COMPILE_AFTER_HOUR: number,
-  client: any
-): Promise<void> {
-  const hour = new Date().getHours()
-  if (hour < COMPILE_AFTER_HOUR) return
-
-  const state = await loadState(absRoot)
-  const logs = (await listDirSafe(absRoot, DAILY_DIR)).filter((f) => f.endsWith(".md"))
-  if (!logs.length) return
-
-  let compiled = 0
-  for (const log of logs) {
-    const content = await readText(absRoot, `${DAILY_DIR}/${log}`)
-    if (!content.trim()) continue
-    const hash = hashStr(content)
-    if (state.ingested?.[log]?.hash === hash) continue
-    try {
-      const success = await compileDailyLog(
-        absRoot,
-        log,
-        content,
-        KNOWLEDGE_DIR,
-        CONCEPTS_SUB,
-        CONNECTIONS_SUB,
-        QA_SUB,
-        INDEX_FILE,
-        LOG_FILE,
-        AGENTS_FILE,
-        client
-      )
-      if (success) {
-        state.ingested = state.ingested || {}
-        state.ingested[log] = { hash, compiled_at: Date.now() }
-        compiled++
-      } else {
-        await debugLog(absRoot, `maybeCompile: compileDailyLog(${log}) returned false, not marking as ingested`)
-      }
-    } catch (err) {
-      // In a real implementation, we'd log this error properly
-      console.error(`Compile failed ${log}: ${err}`)
-    }
-  }
-  await saveState(absRoot, state)
-  if (compiled > 0) {
-    await debugLog(absRoot, `Compiled ${compiled} daily log(s)`)
-  }
 }
 
 // ─── Compile Single Daily Log ────────────────────────────────
@@ -189,6 +130,14 @@ Begin compilation now.`
   }
 
   if (wroteFiles === 0) return false
+
+  // Rebuild search index after successful article writes (async best-effort)
+  try {
+    await buildSearchIndex(absRoot)
+    await debugLog(absRoot, `buildSearchIndex: updated search index after compile`)
+  } catch (err) {
+    await debugLog(absRoot, `buildSearchIndex warning: ${err}`)
+  }
 
   const state = await loadState(absRoot)
   state.last_compile = Date.now()
